@@ -1,0 +1,11 @@
+{
+    "participants": ["Marcus Cavalcante"],
+    "social": [
+        "https://github.com/marvin-env",
+        "https://www.linkedin.com/in/marcus-cavalcante-942228149/",
+        "https://medium.com/@marvin-env"
+    ],
+    "source-code-repo": "https://github.com/marvin-env/rinha-2026-py",
+    "stack": ["python", "uvicorn", "nginx"],
+    "open_to_work": false
+}

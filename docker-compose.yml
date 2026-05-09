@@ -1,0 +1,38 @@
+services:
+  api1:
+    build: .
+    image: rinha-py:latest
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "160MB"
+    networks: [app]
+
+  api2:
+    image: rinha-py:latest
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "160MB"
+    networks: [app]
+    depends_on: [api1]
+
+  lb:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "9999:9999"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: "30MB"
+    networks: [app]
+    depends_on: [api1, api2]
+
+networks:
+  app:
+    driver: bridge
