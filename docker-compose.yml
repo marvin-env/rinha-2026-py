@@ -1,7 +1,6 @@
 services:
   api1:
-    build: .
-    image: rinha-py:latest
+    image: marvinenv/rinha-2026-py:latest
     deploy:
       resources:
         limits:
@@ -10,7 +9,7 @@ services:
     networks: [app]
 
   api2:
-    image: rinha-py:latest
+    image: marvinenv/rinha-2026-py:latest
     deploy:
       resources:
         limits:
