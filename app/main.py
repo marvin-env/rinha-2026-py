@@ -17,12 +17,26 @@ labels = faiss.labels
 _HEADERS_JSON = [(b"content-type", b"application/json")]
 _EMPTY = b""
 
+_WARMUP_BATCHES = 8
+_WARMUP_BATCH_SIZE = 64
+
+
+def _warmup_index() -> None:
+    # Touch IVF posting lists ahead of traffic so the first real batches
+    # don't pay cold-page-cache cost (index is ~66MB on disk).
+    rng = np.random.default_rng(0)
+    for _ in range(_WARMUP_BATCHES):
+        q = rng.random((_WARMUP_BATCH_SIZE, 14), dtype=np.float32)
+        faiss.search_batch(q)
+
 
 class BatchMaker:
-    def __init__(self, max_batch_size: int = 128) -> None:
+    def __init__(self, max_batch_size: int = 32, batch_window: float = 0.005) -> None:
         self._pending: list[tuple[asyncio.Future, np.ndarray]] = []
         self._running: bool = False
         self._max_batch_size = max_batch_size
+        self._batch_window = batch_window
+        self._batch_ready: asyncio.Event | None = None
 
     def _fraud_score(self, row: int):
         how_many_similar_vectors_are_frauds = int(labels[row].sum())
@@ -32,7 +46,10 @@ class BatchMaker:
         loop = asyncio.get_running_loop()
         pending_fraud_score_future = loop.create_future()
         self._pending.append((pending_fraud_score_future, requested_vectorized_payload))
-        
+
+        if self._batch_ready is not None and len(self._pending) >= self._max_batch_size:
+            self._batch_ready.set()
+
         if not self._running:
             self._running = True
             asyncio.create_task(self._batch_processing())
@@ -40,15 +57,25 @@ class BatchMaker:
         return await pending_fraud_score_future
 
     async def _batch_processing(self) -> None:
+        if self._batch_ready is None:
+            self._batch_ready = asyncio.Event()
         try:
             while self._pending:
+                # Coalesce: wait up to batch_window OR until cap hit (event set in submit).
+                self._batch_ready.clear()
+                if len(self._pending) < self._max_batch_size:
+                    try:
+                        await asyncio.wait_for(self._batch_ready.wait(), timeout=self._batch_window)
+                    except asyncio.TimeoutError:
+                        pass
+
                 current_batch = self._pending[:self._max_batch_size]
                 self._pending = self._pending[self._max_batch_size:]
-                
+
                 try:
                     batch_pending_vectors = np.stack([v for _, v in current_batch])
                     similar_vectors = await asyncio.to_thread(faiss.search_batch, batch_pending_vectors)
-                    
+
                     for (peding_fraud_score_future, _), row in zip(current_batch, similar_vectors):
                         if not peding_fraud_score_future.done():
                             fraud_score = self._fraud_score(row)
@@ -105,6 +132,7 @@ async def app(scope, receive, send):
         while True:
             received_msg = await receive()
             if received_msg["type"] == "lifespan.startup":
+                await asyncio.to_thread(_warmup_index)
                 await send({"type": "lifespan.startup.complete"})
             elif received_msg["type"] == "lifespan.shutdown":
                 await send({"type": "lifespan.shutdown.complete"})
