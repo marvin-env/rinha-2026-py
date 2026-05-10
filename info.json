@@ -6,6 +6,6 @@
         "https://medium.com/@marvin-env"
     ],
     "source-code-repo": "https://github.com/marvin-env/rinha-2026-py",
-    "stack": ["python", "uvicorn", "nginx"],
+    "stack": ["python", "uvicorn", "nginx", "faiss"],
     "open_to_work": false
 }

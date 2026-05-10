@@ -16,8 +16,9 @@ LABELS_PATH = RESOURCES / "references.labels.npy"
 DIM = 14
 K = 5
 NLIST = 1024
-NPROBE = 8
+NPROBE = 4
 TRAIN_SAMPLE = 200_000
+DEDUP_GRID = 16  # quantize each [0,1] coord to a 1/16 grid for near-dup collapse
 
 
 def _read_references() -> tuple[np.ndarray, np.ndarray]:
@@ -34,9 +35,28 @@ def _read_references() -> tuple[np.ndarray, np.ndarray]:
     )
 
 
+def _dedup_near_duplicates(
+    vecs: np.ndarray, lbls: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    # Snap each coord to a 1/DEDUP_GRID grid, then keep one original vector per
+    # unique cell. Label is the majority vote across the collapsed vectors
+    # (ties resolved as fraud, since false negatives cost more in the scoring).
+    quantized = np.round(vecs * DEDUP_GRID).astype(np.int16)
+    _, first_idx, inverse, counts = np.unique(
+        quantized, axis=0, return_index=True, return_inverse=True, return_counts=True
+    )
+    label_sums = np.zeros(first_idx.shape[0], dtype=np.int64)
+    np.add.at(label_sums, inverse, lbls.astype(np.int64))
+    majority = (label_sums * 2 >= counts).astype(np.uint8)
+    return vecs[first_idx], majority
+
+
 def _build_faiss() -> tuple[faiss.Index, np.ndarray]:
     vecs, lbls = _read_references()
+    n_before = vecs.shape[0]
+    vecs, lbls = _dedup_near_duplicates(vecs, lbls)
     n = vecs.shape[0]
+    print(f"dedup: {n_before} -> {n} ({100 * (1 - n / n_before):.1f}% reduction)")
 
     rng = np.random.default_rng(42)
     train_idx = rng.choice(n, size=min(TRAIN_SAMPLE, n), replace=False)
