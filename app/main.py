@@ -109,7 +109,9 @@ async def app(scope, receive, send):
 
             received_payload = orjson.loads(bytes(byte_body))
             vectorized_payload = vectorize(received_payload)
-            fraud_score = await batch_maker.submit(vectorized_payload)
+            fraud_score = faiss.fast_score(vectorized_payload)
+            if fraud_score is None:
+                fraud_score = await batch_maker.submit(vectorized_payload)
             response = orjson.dumps({"approved": fraud_score < THRESHOLD, "fraud_score": fraud_score})
 
             await send({"type": "http.response.start", "status": 200, "headers": _HEADERS_JSON})

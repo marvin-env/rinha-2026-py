@@ -14,6 +14,8 @@ COPY --from=build /app/resources/mcc_risk.json ./resources/mcc_risk.json
 COPY --from=build /app/resources/normalization.json ./resources/normalization.json
 COPY --from=build /app/resources/references.faiss ./resources/references.faiss
 COPY --from=build /app/resources/references.labels.npy ./resources/references.labels.npy
+COPY --from=build /app/resources/fast_cells.npy ./resources/fast_cells.npy
+COPY --from=build /app/resources/fast_scores.npy ./resources/fast_scores.npy
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--loop", "uvloop", "--http", "httptools", "--log-level", "warning", "--no-access-log"]
