@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import time
 
 import numpy as np
 import orjson
@@ -20,10 +22,59 @@ _EMPTY = b""
 _WARMUP_BATCHES = 8
 _WARMUP_BATCH_SIZE = 64
 
+_LATENCY_STAGES = ("recv", "parse", "vectorize", "submit", "send", "total")
+_LATENCY_BUF_SIZE = 8192
+_LATENCY_REPORT_INTERVAL = 5.0
+
+
+class LatencyRecorder:
+    def __init__(self, n_stages: int, size: int = _LATENCY_BUF_SIZE) -> None:
+        self._buf = np.zeros((n_stages, size), dtype=np.uint32)
+        self._idx = 0
+        self._n = 0
+        self._size = size
+        self._n_stages = n_stages
+
+    def record(self, stage_us: tuple[int, ...]) -> None:
+        i = self._idx
+        for s in range(self._n_stages):
+            v = stage_us[s]
+            self._buf[s, i] = v if v < 0xFFFFFFFF else 0xFFFFFFFF
+        self._idx = (i + 1) % self._size
+        if self._n < self._size:
+            self._n += 1
+
+    def snapshot(self) -> dict | None:
+        n = self._n
+        if n == 0:
+            return None
+        view = self._buf[:, :n]
+        out = {}
+        for i, name in enumerate(_LATENCY_STAGES):
+            arr = view[i]
+            out[name] = {
+                "p50": int(np.percentile(arr, 50)),
+                "p95": int(np.percentile(arr, 95)),
+                "p99": int(np.percentile(arr, 99)),
+                "max": int(arr.max()),
+            }
+        return {"n": n, "stages_us": out}
+
+
+recorder = LatencyRecorder(len(_LATENCY_STAGES))
+
+
+async def _periodic_latency_report() -> None:
+    while True:
+        await asyncio.sleep(_LATENCY_REPORT_INTERVAL)
+        snap = recorder.snapshot()
+        if snap is None:
+            continue
+        sys.stderr.write("LATENCY " + orjson.dumps(snap).decode() + "\n")
+        sys.stderr.flush()
+
 
 def _warmup_index() -> None:
-    # Touch IVF posting lists ahead of traffic so the first real batches
-    # don't pay cold-page-cache cost (index is ~66MB on disk).
     rng = np.random.default_rng(0)
     for _ in range(_WARMUP_BATCHES):
         q = rng.random((_WARMUP_BATCH_SIZE, 14), dtype=np.float32)
@@ -31,7 +82,7 @@ def _warmup_index() -> None:
 
 
 class BatchMaker:
-    def __init__(self, max_batch_size: int = 32, batch_window: float = 0.005) -> None:
+    def __init__(self, max_batch_size: int = 256, batch_window: float = 0.005) -> None:
         self._pending: list[tuple[asyncio.Future, np.ndarray]] = []
         self._running: bool = False
         self._max_batch_size = max_batch_size
@@ -61,7 +112,6 @@ class BatchMaker:
             self._batch_ready = asyncio.Event()
         try:
             while self._pending:
-                # Coalesce: wait up to batch_window OR until cap hit (event set in submit).
                 self._batch_ready.clear()
                 if len(self._pending) < self._max_batch_size:
                     try:
@@ -103,20 +153,45 @@ async def app(scope, receive, send):
         method = scope["method"]
 
         if method == "POST" and path == "/fraud-score":
+            t0 = time.perf_counter_ns()
             byte_body = bytearray()
             has_body_to_receive = True
             while has_body_to_receive:
                 received_msg = await receive()
                 byte_body.extend(received_msg.get("body", b""))
                 has_body_to_receive = received_msg.get("more_body", False)
+            t_recv = time.perf_counter_ns()
 
             received_payload = orjson.loads(bytes(byte_body))
+            t_parse = time.perf_counter_ns()
+
             vectorized_payload = vectorize(received_payload)
+            t_vectorize = time.perf_counter_ns()
+
             fraud_score = await batch_maker.submit(vectorized_payload)
+            t_submit = time.perf_counter_ns()
+
             response = orjson.dumps({"approved": fraud_score < THRESHOLD, "fraud_score": fraud_score})
 
             await send({"type": "http.response.start", "status": 200, "headers": _HEADERS_JSON})
             await send({"type": "http.response.body", "body": response})
+            t_send = time.perf_counter_ns()
+
+            recorder.record((
+                (t_recv - t0) // 1000,
+                (t_parse - t_recv) // 1000,
+                (t_vectorize - t_parse) // 1000,
+                (t_submit - t_vectorize) // 1000,
+                (t_send - t_submit) // 1000,
+                (t_send - t0) // 1000,
+            ))
+            return
+
+        if method == "GET" and path == "/stats":
+            snap = recorder.snapshot()
+            body = orjson.dumps(snap if snap is not None else {"n": 0})
+            await send({"type": "http.response.start", "status": 200, "headers": _HEADERS_JSON})
+            await send({"type": "http.response.body", "body": body})
             return
 
         if method == "GET" and path == "/ready":
@@ -133,6 +208,7 @@ async def app(scope, receive, send):
             received_msg = await receive()
             if received_msg["type"] == "lifespan.startup":
                 await asyncio.to_thread(_warmup_index)
+                asyncio.create_task(_periodic_latency_report())
                 await send({"type": "lifespan.startup.complete"})
             elif received_msg["type"] == "lifespan.shutdown":
                 await send({"type": "lifespan.shutdown.complete"})
