@@ -29,7 +29,7 @@ def _warmup_index() -> None:
 
 
 class BatchMaker:
-    def __init__(self, max_batch_size: int = 256, batch_window: float = 0.005) -> None:
+    def __init__(self, max_batch_size: int = 128, batch_window: float = 0.005) -> None:
         self._pending: list[tuple[asyncio.Future, np.ndarray]] = []
         self._running: bool = False
         self._max_batch_size = max_batch_size
